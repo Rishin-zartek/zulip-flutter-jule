@@ -10,7 +10,7 @@ This guide provides a comprehensive walkthrough for integrating a custom Flutter
     -   [Dependencies](#dependencies)
     -   [ZulipClient Class (Complete)](#zulipclient-class-complete)
 5.  [Core Usage](#core-usage)
-    -   [Authentication](#authentication)
+    -   [Authentication & Registration](#authentication--registration)
     -   [Starting the Event Loop](#starting-the-event-loop)
     -   [Sending Messages](#sending-messages)
 6.  [Building the App Structure](#building-the-app-structure)
@@ -33,18 +33,20 @@ This guide provides a comprehensive walkthrough for integrating a custom Flutter
     -   [Search (Message & Conversation)](#search-message--conversation)
     -   [Typing Indicators](#typing-indicators)
     -   [Message Translation](#message-translation)
-8.  [Moderation & Security](#moderation--security)
+8.  [Presence & Online Status](#presence--online-status)
+    -   [Updating Your Presence](#updating-your-presence)
+    -   [Fetching User Presence](#fetching-user-presence)
+9.  [Moderation & Security](#moderation--security)
     -   [Mute, Ban, Block](#mute-ban-block)
     -   [Flagging & Reporting](#flagging--reporting)
     -   [Profanity & Spam Protection](#profanity--spam-protection)
     -   [Domain Filters](#domain-filters)
-9.  [Extra Utilities](#extra-utilities)
+10. [Extra Utilities](#extra-utilities)
     -   [Location Sharing](#location-sharing)
-    -   [Presence Indicators](#presence-indicators)
     -   [Custom Message Actions](#custom-message-actions)
     -   [Analytics](#analytics)
-10. [Push Notifications Setup](#push-notifications-setup)
-11. [UI Integration](#ui-integration)
+11. [Push Notifications Setup](#push-notifications-setup)
+12. [UI Integration](#ui-integration)
 
 ---
 
@@ -136,6 +138,7 @@ class ZulipClient {
   int? _lastEventId;
   bool _isEventLoopRunning = false;
   Map<String, dynamic>? _initialData;
+  Timer? _presenceTimer;
 
   // Stream controller to broadcast events to the UI
   final _eventController = StreamController<Map<String, dynamic>>.broadcast();
@@ -163,15 +166,23 @@ class ZulipClient {
     }
   }
 
-  // 2. Start Listening for Events
+  // 2. Start Listening for Events & Reporting Presence
   void start() {
     if (_isEventLoopRunning) return;
     _isEventLoopRunning = true;
     _startEventLoop();
+
+    // Periodically report presence (Zulip expects this every minute)
+    _presenceTimer = Timer.periodic(Duration(seconds: 60), (timer) {
+      updatePresence('active');
+    });
+    // Initial update
+    updatePresence('active');
   }
 
   void stop() {
     _isEventLoopRunning = false;
+    _presenceTimer?.cancel();
   }
 
   Future<void> _registerEventQueue() async {
@@ -376,9 +387,10 @@ class ZulipClient {
 
   // Presence
   Future<void> updatePresence(String status) async {
+    // status: 'active', 'idle'
     await _post('users/me/presence', {
       'status': status,
-      'ping_only': 'false',
+      'ping_only': 'false', // 'true' if just a ping to keep session alive
     });
   }
 
@@ -465,11 +477,15 @@ class ZulipClient {
 
 ## Core Usage
 
-### Authentication
-```dart
-final client = ZulipClient(baseUrl: 'https://chat.example.com');
-await client.authenticate('user@example.com', 'password123');
-```
+### Authentication & Registration
+**Authentication**:
+Use `client.authenticate(email, password)` to obtain an API key.
+
+**Registration (Creating Users)**:
+Normally, users sign up via the Zulip web interface or LDAP/SSO.
+For custom app signups, you need to use the Administration API (requires Admin privileges):
+`POST /api/v1/users`
+Or, if "Dev Auth" is enabled (local development only), you can spoof logins.
 
 ### Starting the Event Loop
 Once authenticated, start listening for real-time events. This handles heartbeats automatically.
@@ -692,6 +708,29 @@ Client-side implementation:
 
 ---
 
+## Presence & Online Status
+
+To show real-time user status (green dot) outside the chat:
+
+### Updating Your Presence
+Zulip clients must report their status periodically.
+The `ZulipClient.start()` method includes a timer to do this automatically every 60 seconds.
+```dart
+// Manually update
+client.updatePresence('active');
+```
+
+### Fetching User Presence
+1.  **Initial Snapshot**: The `register` queue response includes a `presences` object containing the status of all active users.
+2.  **Specific User**:
+    ```dart
+    final presence = await client.getUserPresence(userId);
+    // returns {'aggregated': {'status': 'active', ...}}
+    ```
+3.  **Real-time**: Listen to the event stream for `type: presence` events to update your UI dynamically.
+
+---
+
 ## Moderation & Security
 
 ### Mute, Ban, Block
@@ -714,11 +753,6 @@ Implement a UI action "Report". Since there's no native "Report" API, this usual
 
 ### Location Sharing
 Send a Geo URI or Maps Link: `https://maps.google.com/?q=lat,long`. Zulip renders the link.
-
-### Presence Indicators
-Poll or listen to `presence` events.
--   **Home Screen**: Use the initial snapshot from `register()`.
--   **Real-time**: Listen to the event stream for updates.
 
 ### Custom Message Actions
 Use `submessage` events for app-specific data (like a poll or game move) that shouldn't render as text.
