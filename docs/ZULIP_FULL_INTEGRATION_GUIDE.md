@@ -47,6 +47,9 @@ This guide provides a comprehensive walkthrough for integrating a custom Flutter
     -   [Analytics](#analytics)
 11. [Push Notifications Setup](#push-notifications-setup)
 12. [UI Integration](#ui-integration)
+    -   [Basic Chat Screen](#basic-chat-screen)
+    -   [Pull-to-Refresh History](#pull-to-refresh-history)
+    -   [Full Screen Media (Pull-to-Close)](#full-screen-media-pull-to-close)
 
 ---
 
@@ -789,6 +792,7 @@ Fetch server stats (Admin): `GET /api/v1/analytics/website`.
 
 ## UI Integration
 
+### Basic Chat Screen
 To integrate chat windows:
 1.  **Initialize Client**: `ZulipClient(baseUrl: ...)`
 2.  **Authenticate**: `client.authenticate(...)`
@@ -796,3 +800,57 @@ To integrate chat windows:
 4.  **UI**: Wrap your Chat Screen in a `StreamBuilder(stream: client.eventStream)`.
 
 **Pro Tip**: Use a `Provider` or `GetIt` to make the `ZulipClient` a singleton accessible throughout the app.
+
+### Pull-to-Refresh History
+To allow users to load older messages by dragging down (or up) the list, wrap your `ListView` in a `RefreshIndicator`.
+
+```dart
+RefreshIndicator(
+  onRefresh: () async {
+    // Use the anchor of the first message in your list
+    final firstMessageId = _messages.first['id'];
+    final olderMessages = await client.getMessages(
+      anchor: firstMessageId,
+      numBefore: 20,
+      numAfter: 0,
+      narrow: [...]
+    );
+    setState(() {
+      _messages.insertAll(0, olderMessages);
+    });
+  },
+  child: ListView.builder(...)
+)
+```
+
+### Full Screen Media (Pull-to-Close)
+For viewing images or video, implement a full-screen view that allows the user to drag (pull) down to dismiss it. This is a standard mobile interaction.
+
+```dart
+// Navigate to this widget when an image is tapped
+class FullScreenImageViewer extends StatelessWidget {
+  final String imageUrl;
+  final ZulipClient client;
+
+  const FullScreenImageViewer({required this.imageUrl, required this.client});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Dismissible(
+        key: const Key('media_dismissible'),
+        direction: DismissDirection.vertical,
+        onDismissed: (_) {
+          Navigator.of(context).pop();
+        },
+        child: Center(
+          child: InteractiveViewer(
+            child: AuthImage(url: imageUrl, client: client),
+          ),
+        ),
+      ),
+    );
+  }
+}
+```
