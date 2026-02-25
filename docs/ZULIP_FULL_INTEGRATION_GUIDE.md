@@ -13,7 +13,11 @@ This guide provides a comprehensive walkthrough for integrating a custom Flutter
     -   [Authentication](#authentication)
     -   [Starting the Event Loop](#starting-the-event-loop)
     -   [Sending Messages](#sending-messages)
-6.  [Advanced Features](#advanced-features)
+6.  [Building the App Structure](#building-the-app-structure)
+    -   [Building the Contact List & Home Screen](#building-the-contact-list--home-screen)
+    -   [Displaying Secure Images](#displaying-secure-images)
+    -   [Persistent Message History (Offline Support)](#persistent-message-history-offline-support)
+7.  [Advanced Features](#advanced-features)
     -   [Replies & Threading](#replies--threading)
     -   [Voice Messages & Media](#voice-messages--media)
     -   [Mentions & Silent Messages](#mentions--silent-messages)
@@ -27,21 +31,20 @@ This guide provides a comprehensive walkthrough for integrating a custom Flutter
     -   [Threads (Topics)](#threads-topics)
     -   [Read Receipts & Unread Counts](#read-receipts--unread-counts)
     -   [Search (Message & Conversation)](#search-message--conversation)
-    -   [Persistent Message History](#persistent-message-history)
     -   [Typing Indicators](#typing-indicators)
     -   [Message Translation](#message-translation)
-7.  [Moderation & Security](#moderation--security)
+8.  [Moderation & Security](#moderation--security)
     -   [Mute, Ban, Block](#mute-ban-block)
     -   [Flagging & Reporting](#flagging--reporting)
     -   [Profanity & Spam Protection](#profanity--spam-protection)
     -   [Domain Filters](#domain-filters)
-8.  [Extra Utilities](#extra-utilities)
+9.  [Extra Utilities](#extra-utilities)
     -   [Location Sharing](#location-sharing)
     -   [Presence Indicators](#presence-indicators)
     -   [Custom Message Actions](#custom-message-actions)
     -   [Analytics](#analytics)
-9.  [Push Notifications Setup](#push-notifications-setup)
-10. [UI Integration](#ui-integration)
+10. [Push Notifications Setup](#push-notifications-setup)
+11. [UI Integration](#ui-integration)
 
 ---
 
@@ -320,6 +323,19 @@ class ZulipClient {
 
   // --- Feature Methods ---
 
+  // User & Stream Management
+  Future<List<dynamic>> getAllUsers() async {
+    final response = await _get('users', {'client_gravatar': 'true'});
+    if (response.statusCode == 200) return json.decode(response.body)['members'];
+    throw Exception('Failed to fetch users');
+  }
+
+  Future<List<dynamic>> getSubscriptions() async {
+    final response = await _get('users/me/subscriptions');
+    if (response.statusCode == 200) return json.decode(response.body)['subscriptions'];
+    throw Exception('Failed to fetch subscriptions');
+  }
+
   // Sending Messages
   Future<void> sendMessage({
     required String type, // 'stream' or 'private'
@@ -440,6 +456,8 @@ class ZulipClient {
   Future<void> deleteMessage(int messageId) async {
     await _delete('messages/$messageId');
   }
+
+  String get authHeader => 'Basic ' + base64Encode(utf8.encode('$_email:$_apiKey'));
 }
 ```
 
@@ -472,6 +490,98 @@ await client.sendMessage(
   content: 'Hello everyone!',
 );
 ```
+
+---
+
+## Building the App Structure
+
+### Building the Contact List & Home Screen
+To show "Presence outside the chat box", you need a list of users.
+
+```dart
+// 1. Fetch Users
+List<dynamic> users = await client.getAllUsers();
+
+// 2. Fetch Initial Presence (from register response or active fetch)
+// Note: register() stores this in _initialData, access it via a getter if needed or use:
+Map<String, dynamic> presenceSnapshot = client._initialData?['presences'] ?? {};
+
+// 3. Render List
+ListView.builder(
+  itemCount: users.length,
+  itemBuilder: (context, index) {
+    final user = users[index];
+    final status = presenceSnapshot[user['email']]?['aggregated']?['status'] ?? 'offline';
+
+    return ListTile(
+      title: Text(user['full_name']),
+      leading: CircleAvatar(
+        // Use Authenticated Image for avatars if server is private
+        backgroundImage: NetworkImage(user['avatar_url'], headers: {'Authorization': client.authHeader}),
+      ),
+      trailing: Icon(Icons.circle,
+        color: status == 'active' ? Colors.green : Colors.grey,
+        size: 12,
+      ),
+    );
+  },
+)
+```
+
+### Displaying Secure Images
+Zulip servers usually require authentication to view uploaded files/images. Standard `Image.network` fails.
+
+```dart
+class AuthImage extends StatelessWidget {
+  final String url;
+  final ZulipClient client;
+
+  AuthImage({required this.url, required this.client});
+
+  @override
+  Widget build(BuildContext context) {
+    return Image.network(
+      url,
+      headers: {'Authorization': client.authHeader},
+      errorBuilder: (context, error, stackTrace) => Icon(Icons.error),
+    );
+  }
+}
+```
+
+### Persistent Message History (Offline Support)
+Use `sqflite` to cache messages.
+
+```dart
+class DatabaseHelper {
+  // ... Init DB ...
+  Future<void> saveMessage(Map<String, dynamic> msg) async {
+    await db.insert('messages', {
+      'id': msg['id'],
+      'content': msg['content'],
+      'sender_id': msg['sender_id'],
+      'stream_id': msg['stream_id'],
+      'topic': msg['subject'], // Topic is 'subject' in API
+      'timestamp': msg['timestamp'],
+      'json': json.encode(msg), // Store full blob
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<List<Map<String, dynamic>>> getMessages(int streamId, String topic) async {
+    final maps = await db.query('messages',
+      where: 'stream_id = ? AND topic = ?',
+      whereArgs: [streamId, topic],
+      orderBy: 'timestamp ASC'
+    );
+    return maps.map((m) => json.decode(m['json'] as String)).toList();
+  }
+}
+```
+
+**Strategy:**
+1.  **Load**: `DatabaseHelper.getMessages()` -> Show UI.
+2.  **Fetch**: `client.getMessages(anchor: latestDbId)`.
+3.  **Save**: For each new message, `DatabaseHelper.saveMessage()`.
 
 ---
 
@@ -541,7 +651,23 @@ Topics are just string identifiers in a stream. You can create a new thread simp
 
 ### Read Receipts & Unread Counts
 -   **Read Receipts**: Call `markAsRead([ids])`.
--   **Unread Counts**: Track `update_message_flags` events. If `op: 'add', flag: 'read'`, decrement count. If `op: 'remove', flag: 'read'`, increment.
+-   **Unread Counts**:
+    ```dart
+    class UnreadManager {
+        Set<int> unreadIds = {};
+
+        void handleEvent(Map event) {
+            if (event['type'] == 'message' && !event['flags'].contains('read')) {
+                unreadIds.add(event['message']['id']);
+            } else if (event['type'] == 'update_message_flags') {
+                if (event['flag'] == 'read') {
+                    if (event['op'] == 'add') unreadIds.removeAll(event['messages']);
+                    else unreadIds.addAll(event['messages']);
+                }
+            }
+        }
+    }
+    ```
 
 ### Search (Message & Conversation)
 Use `getMessages` with `narrow`.
@@ -553,13 +679,6 @@ narrow: [{'operator': 'search', 'operand': 'query'}]
 ```dart
 narrow: [{'operator': 'stream', 'operand': 'general'}, {'operator': 'search', 'operand': 'query'}]
 ```
-
-### Persistent Message History
-To persist history offline:
-1.  Use `sqflite` or `hive`.
-2.  On app start, load from DB.
-3.  Call `getMessages(anchor: lastDbId, ...)` to fetch new messages.
-4.  Handle `delete_message` and `update_message` events to update your local DB.
 
 ### Typing Indicators
 Use `sendTypingStatus(op: 'start'/'stop')`. Listen for `typing` events to show UI indicators.
