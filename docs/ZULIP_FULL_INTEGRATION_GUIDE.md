@@ -1,6 +1,6 @@
 # Zulip Full Integration Guide for Flutter Developers
 
-This guide provides a comprehensive walkthrough for integrating a custom Flutter application with a self-hosted Zulip server. It covers everything from basic authentication to advanced features like typing indicators, presence, file uploads, and push notifications.
+This guide provides a comprehensive walkthrough for integrating a custom Flutter application with a self-hosted Zulip server. It covers everything from basic authentication to advanced features like typing indicators, presence, file uploads, and push notifications, as well as bot integrations and moderation.
 
 ## Table of Contents
 1.  [Overview](#overview)
@@ -26,6 +26,13 @@ This guide provides a comprehensive walkthrough for integrating a custom Flutter
     -   [Unread Message Counts](#unread-message-counts)
     -   [Group Chats (Private Groups)](#group-chats-private-groups)
     -   [Search & Filtering](#search--filtering)
+    -   [Link Previews](#link-previews)
+    -   [AI Chatbot Integration](#ai-chatbot-integration)
+    -   [Moderation & Reporting](#moderation--reporting)
+    -   [Location Sharing](#location-sharing)
+    -   [Message Translation](#message-translation)
+    -   [Analytics](#analytics)
+    -   [Silent Messages](#silent-messages)
 7.  [Push Notifications](#push-notifications)
 8.  [UI Integration](#ui-integration)
 
@@ -95,6 +102,8 @@ dependencies:
   shared_preferences: ^2.2.0
   firebase_messaging: ^14.7.0 # For Push Notifications
   flutter_local_notifications: ^16.0.0
+  flutter_html: ^3.0.0 # For rendering message content (optional)
+  url_launcher: ^6.1.11 # For link handling
 ```
 
 ### ZulipClient Class (Complete)
@@ -113,6 +122,7 @@ class ZulipClient {
   String? _queueId;
   int? _lastEventId;
   bool _isEventLoopRunning = false;
+  Map<String, dynamic>? _initialData;
 
   // Stream controller to broadcast events to the UI
   final _eventController = StreamController<Map<String, dynamic>>.broadcast();
@@ -152,16 +162,29 @@ class ZulipClient {
   }
 
   Future<void> _registerEventQueue() async {
+    // We register for many event types.
+    // fetch_event_types: ['message', 'presence'] gets initial snapshots of messages and user status.
     final response = await _post('register', {
-      'event_types': json.encode(['message', 'heartbeat', 'realm_emoji', 'reaction', 'typing', 'presence', 'update_message_flags']),
-      'fetch_event_types': json.encode(['message']), // Fetch initial messages if needed
+      'event_types': json.encode([
+        'message', 'heartbeat', 'realm_emoji', 'reaction', 'typing',
+        'presence', 'update_message_flags', 'stream', 'subscription'
+      ]),
+      'fetch_event_types': json.encode(['message', 'presence']),
       'apply_markdown': 'true',
+      'client_gravatar': 'true',
     });
 
     if (response.statusCode == 200) {
       final data = json.decode(response.body);
       _queueId = data['queue_id'];
       _lastEventId = data['last_event_id']; // Usually -1
+      _initialData = data; // Store initial snapshot (presences, unread counts, etc.)
+
+      // Handle initial presence snapshot immediately if needed
+      if (data.containsKey('presences')) {
+         _eventController.add({'type': 'initial_presence', 'presences': data['presences']});
+      }
+
       print('Queue registered: $_queueId');
     } else {
       throw Exception('Failed to register queue: ${response.body}');
@@ -460,16 +483,18 @@ client.sendTypingStatus(op: 'stop', to: [456]);
 Listen for events where `type == 'typing'`.
 
 ### Presence (Online Status)
-**Update Status:**
-```dart
-// Set as 'active'
-client.updatePresence('active');
-```
+Presence can be fetched actively or received in real-time.
 
-**Get Status:**
+**Initial Snapshot:**
+When you call `start()`, the `register` endpoint can fetch all user statuses. You can use this to populate a contact list (e.g., "Active Users") even outside the chat window.
+
+**Real-time Updates:**
+Listen for `type == 'presence'` events to update user dots (green/orange/gray) in your UI.
+
+**Update Your Status:**
 ```dart
-final presence = await client.getUserPresence(456);
-print(presence);
+// Set as 'active' (e.g., app resumed)
+client.updatePresence('active');
 ```
 
 ### File & Voice Message Uploads
@@ -551,6 +576,52 @@ Use the `narrow` parameter in `getMessages`:
 // Search for "urgent"
 await client.getMessages(..., narrow: [{'operator': 'search', 'operand': 'urgent'}]);
 ```
+
+### Link Previews
+Zulip servers automatically generate link previews (Open Graph data) for URLs in messages.
+The API response for a message includes a `content` field (HTML) which often contains the preview markup.
+Simply rendering the HTML using `flutter_html` will display these previews. If you need raw data, you can parse the HTML or rely on specific Zulip server extensions that might return structured preview data.
+
+### AI Chatbot Integration
+To integrate an AI chatbot:
+1.  **Create a Bot User**: In Zulip settings, create a Generic Bot.
+2.  **Outgoing Webhooks**: Configure an Outgoing Webhook to point to your AI service's API endpoint.
+3.  **Interaction**: When users mention the bot (`@**MyAI**`), Zulip sends a POST request to your webhook. Your service processes the text via an LLM (e.g., ChatGPT API) and responds to the webhook, which posts a reply back to Zulip.
+
+### Moderation & Reporting
+**Muting Topics**:
+Users can mute topics to stop receiving notifications.
+```dart
+// Mute a topic (User specific settings)
+// Use the /users/me/subscriptions/muted_topics endpoint
+```
+
+**Reporting**:
+Add a "Report Message" action in your UI. This can trigger an API call to a custom endpoint or simply email the admins with the message link. Zulip also supports "flagging" messages natively in some configurations.
+
+### Location Sharing
+To share a location, send a Google Maps link or a Geo URI. Zulip renders links automatically.
+```dart
+String mapLink = 'https://www.google.com/maps/search/?api=1&query=37.7749,-122.4194';
+await client.sendMessage(..., content: 'I am here: $mapLink');
+```
+
+### Message Translation
+Implement a "Translate" action on message long-press.
+1.  Get message content.
+2.  Send to Google Translate API (or similar).
+3.  Show translation in a modal or replace content locally.
+*Note: Zulip doesn't translate natively server-side.*
+
+### Analytics
+To get usage stats (e.g., active users, message counts), use the `/server_settings` or `/analytics` endpoints if you are an admin.
+```dart
+// Fetch server stats (Admin only)
+// GET /api/v1/analytics/website
+```
+
+### Silent Messages
+To send a message without notifying users (if supported by server configuration), you usually manage this via stream notification settings. However, you can also support "silent mentions" by using the syntax `@_**User Name**` (with an underscore), which mentions them but suppresses the push notification.
 
 ---
 
