@@ -1,6 +1,6 @@
 # Zulip Full Integration Guide for Flutter Developers
 
-This guide provides a comprehensive walkthrough for integrating a custom Flutter application with a self-hosted Zulip server. It covers everything from basic authentication to advanced features like typing indicators, presence, file uploads, and push notifications, as well as bot integrations and moderation.
+This guide provides a comprehensive walkthrough for integrating a custom Flutter application with a self-hosted Zulip server. It covers everything from basic authentication to advanced features like typing indicators, presence, file uploads, push notifications, and extensive moderation capabilities.
 
 ## Table of Contents
 1.  [Overview](#overview)
@@ -14,27 +14,34 @@ This guide provides a comprehensive walkthrough for integrating a custom Flutter
     -   [Starting the Event Loop](#starting-the-event-loop)
     -   [Sending Messages](#sending-messages)
 6.  [Advanced Features](#advanced-features)
-    -   [Typing Indicators](#typing-indicators)
-    -   [Presence (Online Status)](#presence-online-status)
-    -   [File & Voice Message Uploads](#file--voice-message-uploads)
     -   [Replies & Threading](#replies--threading)
+    -   [Voice Messages & Media](#voice-messages--media)
+    -   [Mentions & Silent Messages](#mentions--silent-messages)
     -   [Emoji Reactions](#emoji-reactions)
-    -   [Read Receipts](#read-receipts)
-    -   [Fetching Message History](#fetching-message-history)
-    -   [Editing & Deleting Messages](#editing--deleting-messages)
-    -   [Mentions](#mentions)
-    -   [Unread Message Counts](#unread-message-counts)
-    -   [Group Chats (Private Groups)](#group-chats-private-groups)
-    -   [Search & Filtering](#search--filtering)
     -   [Link Previews](#link-previews)
+    -   [Edit & Delete Messages](#edit--delete-messages)
+    -   [Private & Group Chats](#private--group-chats)
+    -   [Large Public Groups](#large-public-groups)
     -   [AI Chatbot Integration](#ai-chatbot-integration)
-    -   [Moderation & Reporting](#moderation--reporting)
-    -   [Location Sharing](#location-sharing)
+    -   [Notifications](#notifications)
+    -   [Threads (Topics)](#threads-topics)
+    -   [Read Receipts & Unread Counts](#read-receipts--unread-counts)
+    -   [Search (Message & Conversation)](#search-message--conversation)
+    -   [Persistent Message History](#persistent-message-history)
+    -   [Typing Indicators](#typing-indicators)
     -   [Message Translation](#message-translation)
+7.  [Moderation & Security](#moderation--security)
+    -   [Mute, Ban, Block](#mute-ban-block)
+    -   [Flagging & Reporting](#flagging--reporting)
+    -   [Profanity & Spam Protection](#profanity--spam-protection)
+    -   [Domain Filters](#domain-filters)
+8.  [Extra Utilities](#extra-utilities)
+    -   [Location Sharing](#location-sharing)
+    -   [Presence Indicators](#presence-indicators)
+    -   [Custom Message Actions](#custom-message-actions)
     -   [Analytics](#analytics)
-    -   [Silent Messages](#silent-messages)
-7.  [Push Notifications](#push-notifications)
-8.  [UI Integration](#ui-integration)
+9.  [Push Notifications Setup](#push-notifications-setup)
+10. [UI Integration](#ui-integration)
 
 ---
 
@@ -104,6 +111,9 @@ dependencies:
   flutter_local_notifications: ^16.0.0
   flutter_html: ^3.0.0 # For rendering message content (optional)
   url_launcher: ^6.1.11 # For link handling
+  # Optional: For caching/persistence
+  sqflite: ^2.3.0
+  path: ^1.9.0
 ```
 
 ### ZulipClient Class (Complete)
@@ -167,9 +177,10 @@ class ZulipClient {
     final response = await _post('register', {
       'event_types': json.encode([
         'message', 'heartbeat', 'realm_emoji', 'reaction', 'typing',
-        'presence', 'update_message_flags', 'stream', 'subscription'
+        'presence', 'update_message_flags', 'stream', 'subscription', 'alert_words',
+        'update_message', 'delete_message', 'submessage'
       ]),
-      'fetch_event_types': json.encode(['message', 'presence']),
+      'fetch_event_types': json.encode(['message', 'presence', 'subscription']),
       'apply_markdown': 'true',
       'client_gravatar': 'true',
     });
@@ -235,6 +246,10 @@ class ZulipClient {
               }
             }
           }
+        } else if (response.statusCode == 429) {
+           // Rate Limit Handling
+           print('Rate limited. Waiting...');
+           await Future.delayed(Duration(seconds: 10));
         } else {
           // Handle error (e.g., queue expired, re-register)
           print('Event loop error: ${response.body}');
@@ -456,265 +471,163 @@ await client.sendMessage(
   topic: 'general',
   content: 'Hello everyone!',
 );
-
-// Send to a Private User
-await client.sendMessage(
-  type: 'private',
-  to: [456], // User ID
-  topic: '',
-  content: 'Hi there!',
-);
 ```
 
 ---
 
 ## Advanced Features
 
-### Typing Indicators
-**Send Status:**
-```dart
-// Start typing
-client.sendTypingStatus(op: 'start', to: [456]);
-// Stop typing (after delay)
-client.sendTypingStatus(op: 'stop', to: [456]);
-```
-
-**Receive Status:**
-Listen for events where `type == 'typing'`.
-
-### Presence (Online Status)
-Presence can be fetched actively or received in real-time.
-
-**Initial Snapshot:**
-When you call `start()`, the `register` endpoint can fetch all user statuses. You can use this to populate a contact list (e.g., "Active Users") even outside the chat window.
-
-**Real-time Updates:**
-Listen for `type == 'presence'` events to update user dots (green/orange/gray) in your UI.
-
-**Update Your Status:**
-```dart
-// Set as 'active' (e.g., app resumed)
-client.updatePresence('active');
-```
-
-### File & Voice Message Uploads
-Voice messages are just file uploads linked in Markdown.
-
-```dart
-// 1. Record audio to a local file
-String audioPath = '/path/to/audio.m4a';
-
-// 2. Upload
-String uri = await client.uploadFile(audioPath);
-
-// 3. Send Message with Link
-await client.sendMessage(
-  type: 'private',
-  to: [456],
-  content: '[Voice Message]($uri)',
-  topic: '',
-);
-```
-
 ### Replies & Threading
-To reply in a stream, simply send a message to the **same Stream ID** and **same Topic name**.
-
-To quote a message:
+Zulip threading is topic-based. To reply, send a message to the same Stream ID and Topic.
+To quote:
 ```markdown
-@**User Name** [said](link_to_msg):
-> Quoted text here
-My reply here.
+@**User** [said](link):
+> Quote
+Reply
 ```
+
+### Voice Messages & Media
+Upload the file using `uploadFile()`, then send a message with the link:
+```dart
+String uri = await client.uploadFile(path);
+await client.sendMessage(..., content: '[Voice Note]($uri)');
+// Video/Image: ![Title]($uri)
+```
+
+### Mentions & Silent Messages
+-   **Mention**: `@**User Name**`
+-   **Silent Mention**: `@_**User Name**` (No push notification)
+-   **Global**: `@**all**` (use sparingly)
 
 ### Emoji Reactions
 ```dart
 await client.addReaction(messageId, 'thumbs_up');
 ```
 
-### Read Receipts
-```dart
-await client.markAsRead([1001, 1002]);
-```
+### Link Previews
+Render the `content` (HTML) from the message object using `flutter_html`. Zulip servers generate Open Graph previews in the HTML automatically.
 
-### Fetching Message History
+### Edit & Delete Messages
 ```dart
-final history = await client.getMessages(
-  anchor: 0, // Oldest
-  numBefore: 0,
-  numAfter: 50,
-  narrow: [{'operator': 'stream', 'operand': 'general'}],
-);
-```
-
-### Editing & Deleting Messages
-```dart
-await client.updateMessage(msgId, 'Corrected text');
+await client.updateMessage(msgId, 'New text');
 await client.deleteMessage(msgId);
 ```
 
-### Mentions
-Use Markdown syntax: `@**User Name**`.
-When parsing messages, look for `flags: ['mentioned']`.
-
-### Unread Message Counts
-Track local state by listening to `update_message_flags` events. Check if the `read` flag is added or removed.
-
-### Group Chats (Private Groups)
-Send to multiple user IDs:
+### Private & Group Chats
+Private 1-1 and Group chats use the same `private` type.
 ```dart
+// Group Chat
 await client.sendMessage(
   type: 'private',
-  to: [123, 456, 789],
-  content: 'Team update!',
+  to: [101, 102, 103],
+  content: 'Team update',
   topic: '',
 );
 ```
 
-### Search & Filtering
-Use the `narrow` parameter in `getMessages`:
-```dart
-// Search for "urgent"
-await client.getMessages(..., narrow: [{'operator': 'search', 'operand': 'urgent'}]);
-```
-
-### Link Previews
-Zulip servers automatically generate link previews (Open Graph data) for URLs in messages.
-The API response for a message includes a `content` field (HTML) which often contains the preview markup.
-Simply rendering the HTML using `flutter_html` will display these previews. If you need raw data, you can parse the HTML or rely on specific Zulip server extensions that might return structured preview data.
+### Large Public Groups
+Use **Streams**. Streams can have hundreds or thousands of subscribers. Use the `stream` type in `sendMessage`.
 
 ### AI Chatbot Integration
-To integrate an AI chatbot:
-1.  **Create a Bot User**: In Zulip settings, create a Generic Bot.
-2.  **Outgoing Webhooks**: Configure an Outgoing Webhook to point to your AI service's API endpoint.
-3.  **Interaction**: When users mention the bot (`@**MyAI**`), Zulip sends a POST request to your webhook. Your service processes the text via an LLM (e.g., ChatGPT API) and responds to the webhook, which posts a reply back to Zulip.
+1.  **Create Bot**: Create a "Generic Bot" in Zulip settings.
+2.  **Webhook**: Set up an Outgoing Webhook pointing to your AI service.
+3.  **Process**: When the bot is mentioned, Zulip POSTs to your service. Your service replies to the webhook to post the AI response.
 
-### Moderation & Reporting
-**Muting Topics**:
-Users can mute topics to stop receiving notifications.
+### Notifications
+Handled via the Event Queue (foreground) and FCM/APNs (background). See "Push Notifications Setup".
+
+### Threads (Topics)
+Topics are just string identifiers in a stream. You can create a new thread simply by sending a message with a new topic name.
+
+### Read Receipts & Unread Counts
+-   **Read Receipts**: Call `markAsRead([ids])`.
+-   **Unread Counts**: Track `update_message_flags` events. If `op: 'add', flag: 'read'`, decrement count. If `op: 'remove', flag: 'read'`, increment.
+
+### Search (Message & Conversation)
+Use `getMessages` with `narrow`.
+**Message Search**:
 ```dart
-// Mute a topic (User specific settings)
-// Use the /users/me/subscriptions/muted_topics endpoint
+narrow: [{'operator': 'search', 'operand': 'query'}]
+```
+**Conversation Search**:
+```dart
+narrow: [{'operator': 'stream', 'operand': 'general'}, {'operator': 'search', 'operand': 'query'}]
 ```
 
-**Reporting**:
-Add a "Report Message" action in your UI. This can trigger an API call to a custom endpoint or simply email the admins with the message link. Zulip also supports "flagging" messages natively in some configurations.
+### Persistent Message History
+To persist history offline:
+1.  Use `sqflite` or `hive`.
+2.  On app start, load from DB.
+3.  Call `getMessages(anchor: lastDbId, ...)` to fetch new messages.
+4.  Handle `delete_message` and `update_message` events to update your local DB.
 
-### Location Sharing
-To share a location, send a Google Maps link or a Geo URI. Zulip renders links automatically.
-```dart
-String mapLink = 'https://www.google.com/maps/search/?api=1&query=37.7749,-122.4194';
-await client.sendMessage(..., content: 'I am here: $mapLink');
-```
+### Typing Indicators
+Use `sendTypingStatus(op: 'start'/'stop')`. Listen for `typing` events to show UI indicators.
 
 ### Message Translation
-Implement a "Translate" action on message long-press.
-1.  Get message content.
-2.  Send to Google Translate API (or similar).
-3.  Show translation in a modal or replace content locally.
-*Note: Zulip doesn't translate natively server-side.*
-
-### Analytics
-To get usage stats (e.g., active users, message counts), use the `/server_settings` or `/analytics` endpoints if you are an admin.
-```dart
-// Fetch server stats (Admin only)
-// GET /api/v1/analytics/website
-```
-
-### Silent Messages
-To send a message without notifying users (if supported by server configuration), you usually manage this via stream notification settings. However, you can also support "silent mentions" by using the syntax `@_**User Name**` (with an underscore), which mentions them but suppresses the push notification.
+Client-side implementation:
+1.  Long-press message.
+2.  Call Google Translate API.
+3.  Show translation overlay.
+(Zulip has no native translation API).
 
 ---
 
-## Push Notifications
+## Moderation & Security
 
-Push notifications ensure users receive messages when the app is in the background.
+### Mute, Ban, Block
+-   **Mute User**: User-side preference. Store a list of muted User IDs locally and filter them out of your UI list.
+-   **Mute Topic**: Use `/users/me/subscriptions/muted_topics`.
+-   **Ban User**: (Admin only) Use `/users/{user_id}` PATCH to deactivate a user.
+-   **Block**: Zulip doesn't have a "block" feature exactly like social media; "Mute" is the standard.
 
-1.  **Initialize Firebase** in your `main.dart`:
+### Flagging & Reporting
+Implement a UI action "Report". Since there's no native "Report" API, this usually means sending a structured message to an Admin stream or via email.
+
+### Profanity & Spam Protection
+-   **Profanity**: Implement client-side filtering or use a server-side outgoing webhook to analyze/delete messages.
+-   **Spam**: The `ZulipClient` handles 429 Rate Limit errors by waiting.
+-   **Domain Filters**: Configure "Restrict to domain" in Server Settings (Admin panel) to prevent unauthorized signups.
+
+---
+
+## Extra Utilities
+
+### Location Sharing
+Send a Geo URI or Maps Link: `https://maps.google.com/?q=lat,long`. Zulip renders the link.
+
+### Presence Indicators
+Poll or listen to `presence` events.
+-   **Home Screen**: Use the initial snapshot from `register()`.
+-   **Real-time**: Listen to the event stream for updates.
+
+### Custom Message Actions
+Use `submessage` events for app-specific data (like a poll or game move) that shouldn't render as text.
+Or, use raw JSON in the content (e.g., `json { "poll_id": 123 } `) and parse it client-side if it matches a specific schema.
+
+### Analytics
+Fetch server stats (Admin): `GET /api/v1/analytics/website`.
+
+---
+
+## Push Notifications Setup
+
+1.  **Firebase**: Add `firebase_messaging`.
+2.  **Register**:
     ```dart
-    await Firebase.initializeApp();
-    FirebaseMessaging messaging = FirebaseMessaging.instance;
-    NotificationSettings settings = await messaging.requestPermission();
+    String? token = await FirebaseMessaging.instance.getToken();
+    await client.registerFcmToken(token!);
     ```
-
-2.  **Get the Token and Register with Zulip**:
-    ```dart
-    String? token = await messaging.getToken();
-    if (token != null) {
-      await zulipClient.registerFcmToken(token);
-    }
-
-    // Listen for token refreshes
-    messaging.onTokenRefresh.listen((newToken) {
-      zulipClient.registerFcmToken(newToken);
-    });
-    ```
-
-3.  **Handle Incoming Messages**:
-    Configure `FirebaseMessaging.onBackgroundMessage` to handle the data payload sent by Zulip. Zulip sends the message content in the `data` field.
+3.  **Background**: Define a top-level function `Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message)`.
 
 ---
 
 ## UI Integration
 
 To integrate chat windows:
+1.  **Initialize Client**: `ZulipClient(baseUrl: ...)`
+2.  **Authenticate**: `client.authenticate(...)`
+3.  **Start**: `client.start()`
+4.  **UI**: Wrap your Chat Screen in a `StreamBuilder(stream: client.eventStream)`.
 
-1.  **Initialize Client**: Create an instance of `ZulipClient`.
-2.  **Authenticate**: Call `authenticate()`.
-3.  **Connect**: Call `start()`.
-4.  **Listen**: Use a `StreamBuilder` to listen to `client.eventStream`.
-
-**Sample Chat Screen Structure:**
-
-```dart
-class ChatScreen extends StatefulWidget {
-  final ZulipClient client;
-  // ...
-}
-
-class _ChatScreenState extends State<ChatScreen> {
-  final List<dynamic> _messages = [];
-
-  @override
-  void initState() {
-    super.initState();
-    // Listen for real-time messages
-    widget.client.eventStream.listen((event) {
-      if (event['type'] == 'message') {
-        setState(() {
-          _messages.add(event['message']);
-        });
-      }
-    });
-  }
-
-  void _sendMessage(String text) {
-    widget.client.sendMessage(
-      type: 'stream',
-      to: 123, // Stream ID
-      topic: 'general',
-      content: text,
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Expanded(
-          child: ListView.builder(
-            itemCount: _messages.length,
-            itemBuilder: (context, index) {
-              final msg = _messages[index];
-              return ListTile(
-                title: Text(msg['sender_full_name']),
-                subtitle: Text(msg['content']),
-              );
-            },
-          ),
-        ),
-        // Input field and send button calling _sendMessage
-      ],
-    );
-  }
-}
-```
+**Pro Tip**: Use a `Provider` or `GetIt` to make the `ZulipClient` a singleton accessible throughout the app.
