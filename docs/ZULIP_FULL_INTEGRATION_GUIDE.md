@@ -64,6 +64,7 @@ Integration relies on a few key concepts:
 -   A **self-hosted Zulip server** (version 4.0+ recommended).
 -   A **Flutter project**.
 -   Access to the server's `/etc/zulip/settings.py` for push notification configuration.
+-   **Initial Access**: You typically need a web account or an admin token to create the first bot/user for your mobile app if you aren't using LDAP/SSO.
 
 ## Server Configuration
 
@@ -487,6 +488,15 @@ For custom app signups, you need to use the Administration API (requires Admin p
 `POST /api/v1/users`
 Or, if "Dev Auth" is enabled (local development only), you can spoof logins.
 
+**Creating a User (Admin Only):**
+```bash
+curl -X POST https://yourzulipserver.com/api/v1/users \
+    -u admin@example.com:ADMIN_API_KEY \
+    -d "email=newuser@example.com" \
+    -d "password=securepassword" \
+    -d "full_name=New User"
+```
+
 ### Starting the Event Loop
 Once authenticated, start listening for real-time events. This handles heartbeats automatically.
 ```dart
@@ -527,7 +537,9 @@ ListView.builder(
   itemCount: users.length,
   itemBuilder: (context, index) {
     final user = users[index];
-    final status = presenceSnapshot[user['email']]?['aggregated']?['status'] ?? 'offline';
+    final email = user['email'];
+    // Parse complex presence object: {'aggregated': {'status': 'active', ...}}
+    final status = presenceSnapshot[email]?['aggregated']?['status'] ?? 'offline';
 
     return ListTile(
       title: Text(user['full_name']),
